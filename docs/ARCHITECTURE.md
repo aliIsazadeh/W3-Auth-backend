@@ -193,3 +193,8 @@ integration tests.
   client SDKs.
 - Instant access-token revocation (Redis `jti` denylist) — only if a real need
   appears.
+- M0 derives the SIWE `Expiration Time` from `issuedAt + nonceTtl` (one
+  config, the Redis TTL). Clock-skew tolerance for validating that timestamp
+  is deferred to M1's message-validation step, as a separate
+  `clockSkewTolerance` margin applied when *checking* the timestamp — not as
+  a second expiry window at generation time.
