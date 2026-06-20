@@ -40,13 +40,13 @@ flowchart LR
 |------------------|---------------------------------------------------------------------|--------------|
 | `identity`       | `CaipAccountId`, `Namespace` — the wallet identity model            | M0 ✅        |
 | `challenge`      | `Challenge`, `Nonce`, `ChallengeStore` (port), `ChallengePolicy`, `SiweMessageFactory` | M0 ✅ |
-| `usecase`        | `RequestChallenge` (M0), `VerifyAndAuthenticate` (M1), `RefreshSession` + `Logout` (M2) | M0 partial ✅ |
-| `infrastructure` | Redis adapters (`RedisChallengeStore`), JPA entities + repos, Flyway migrations | M0 partial ✅ |
-| `config`         | Composition root — wires use cases to infrastructure, supplies `Clock` and `ChallengePolicy` beans | M0 ✅ |
-| `api`            | REST controllers, request/response DTOs                             | M0 step 6 ⬜ |
-| `verification`   | `SignatureVerifier` (interface), `EthereumSignatureVerifier`, SIWE parser | M1 ⬜  |
-| `session`        | Access JWT, refresh token logic, `SessionStore` (port)              | M1–M2 ⬜    |
-| `security`       | Spring Security config, JWT filter                                  | M1 ⬜        |
+| `usecase`        | `RequestChallenge` (M0), `VerifyAndAuthenticate` (M1), `RefreshSession` + `Logout` (M2) | M1 partial ✅ |
+| `infrastructure` | Redis adapters (`RedisChallengeStore`), JPA entities + repos, Flyway migrations, `JwtConfiguration` | M1 partial ✅ |
+| `config`         | Composition root — wires use cases to infrastructure, supplies `Clock`, `ChallengePolicy`, `JwtService` beans | M1 ✅ |
+| `api`            | REST controllers, request/response DTOs                             | M1 partial ✅ |
+| `verification`   | `SignatureVerifier` (interface), `EthereumSignatureVerifier`, SIWE parser | M1 ✅  |
+| `session`        | `JwtPolicy`, `JwtService` (access JWT); refresh token logic, `SessionStore` (port) | M1 partial ✅ / M2 ⬜ |
+| `security`       | Spring Security config; JWT filter (M2)                             | M1 partial ✅ / M2 ⬜ |
 
 ---
 
@@ -55,7 +55,7 @@ flowchart LR
 | Milestone | Goal | Status |
 |-----------|------|--------|
 | **M0** | Project skeleton; CAIP-10 identity; Redis challenge store with atomic nonce; `/challenge` endpoint; docker-compose; ArchUnit guard | Steps 1–5 done ✅; step 6 (controller) next ⬜ |
-| **M1** | SIWE parsing + full field validation; EOA `ecrecover`; signer-equals-claim check; identity upsert; access JWT. First end-to-end login | ⬜ |
+| **M1** | SIWE parsing + full field validation; EOA `ecrecover`; signer-equals-claim check; identity upsert; access JWT. First end-to-end login | Steps 1–5 done ✅ |
 | **M2** | Refresh tokens; rotation; reuse detection (family revocation); logout. Security audit pass | ⬜ |
 | **M3** | Smart-contract wallets (EIP-1271 + EIP-6492); RPC dependency; per-`(chainId, address, msgHash)` caching. Likely triggers `verification` module split | ⬜ |
 | **M4** | Second namespace (Solana / Ed25519) to prove and harden the abstraction; only then a real protocol registry | ⬜ |
@@ -65,6 +65,83 @@ Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integ
 ---
 
 ## Part 2 — Step Log
+
+---
+
+## M1 · step 5 — Access JWT issuance + POST /v1/auth/verify   (commit <hash>)
+
+**What:** Completed the M1 end-to-end login. Nine files created, seven modified.
+
+*Core (no Spring):*
+- `JwtPolicy` — immutable record in `session`: `(signingKey, ttl, audience)`. Compact constructor rejects nulls, zero/negative TTL, blank audience. No Spring annotations — pure value object.
+- `JwtService` — in `session`. One method: `issue(CaipAccountId account, Instant issuedAt) → String`. HS256 JWT with `sub = account.toString()` (CAIP-10), `jti = UUID`, `iat`, `exp = issuedAt + ttl`, audience. Takes `issuedAt` from the caller, not from an internal clock. Second method: `ttl() → Duration`, so callers can compute `expiresAt` without re-parsing the token.
+- `AuthResult` — 2-field record in `usecase`: `(String token, Instant expiresAt)`. The controller needs both fields; it can get neither without a thin DTO from the layer that computed them.
+
+*Use case change:*
+- `VerifyAndAuthenticate.execute()` return type changed from `CaipAccountId` to `AuthResult`. Step 7 added: `Instant issuedAt = clock.instant(); String token = jwtService.issue(account, issuedAt); return new AuthResult(token, issuedAt.plus(jwtService.ttl()))`. Clock injection already existed from M1 step 2.
+
+*Infrastructure/config:*
+- `JwtProperties` — `@ConfigurationProperties(prefix = "walletauth.jwt")`: `secret` (Base64 string), `ttl` (Duration), `audience` (string).
+- `JwtConfiguration` — startup guard: decodes Base64 secret → checks `keyBytes.length ≥ 32` → throws `IllegalStateException("…must be at least 256 bits (32 bytes)…got N bytes")` → calls `Keys.hmacShaKeyFor(keyBytes)` → creates `JwtPolicy` and `JwtService` beans. JJWT also enforces this with `WeakKeyException`, but our check produces a clear actionable error message before JJWT sees the bytes.
+- `application.yml` — new `walletauth.jwt` section with `secret`/`ttl`/`audience`, all env-overridable via `WALLETAUTH_JWT_SECRET` / `WALLETAUTH_JWT_TTL` / `WALLETAUTH_JWT_AUDIENCE`. Local-dev default: a 32-byte Base64 string clearly marked `LOCAL DEV ONLY` with an `openssl rand -base64 32` reminder for production.
+
+*API:*
+- `VerifyRequest` — `(@NotBlank String message, @NotBlank String signature)`.
+- `VerifyResponse` — `(String token, Instant expiresAt)`.
+- `VerifyController` — `POST /v1/auth/verify`: `@Valid @RequestBody VerifyRequest`, calls `verifyAndAuthenticate.execute(...)`, returns `VerifyResponse`. Declares `throws VerificationException` to let `GlobalExceptionHandler` catch it.
+- `GlobalExceptionHandler` — new `@ExceptionHandler(VerificationException.class)` → 401 + `{"error": message}`.
+
+*JWT library choice — JJWT 0.12.6:*
+Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackson` (runtimeOnly). The impl/jackson split keeps JJWT's internal parser and Jackson bridge off the compile classpath — production code only sees the fluent builder API. `Keys.hmacShaKeyFor()` enforces the 256-bit minimum at the key-creation site, not at the signing site, which is where the enforcement should live.
+
+*Tests:* `JwtServiceTest` — 6 tests with fixed clock `FIXED_NOW`. A helper `parseClaims(token, key, now)` feeds a synthetic clock to `Jwts.parser()` so expiry assertions are deterministic without sleeping. Covers: sub = CAIP-10, exp = iat + TTL, jti present, audience correct, wrong key → `JwtException`, clock past expiry → `ExpiredJwtException`. `JwtConfigurationTest` — 2 tests in the `infrastructure` package (same package as `JwtConfiguration`, which is package-private) — valid 32-byte secret creates policy, 31-byte secret throws `IllegalStateException` containing "256 bits". `VerifyControllerTest` — 6 tests with `standaloneSetup`, a stub `VerifyAndAuthenticate`, and real `LocalValidatorFactoryBean`. Covers: valid → 200 + token + expiresAt; `VerificationException` → 401; missing/blank fields → 400. `VerifyAndAuthenticateTest` expanded from 10 to 12 tests: happy path split into 3 assertions (token not blank + expiresAt correct, sub = CAIP-10, identity upserted). `VerifyFlowE2ETest` — the M1 proof: two tests using real Postgres and Redis containers (Testcontainers), Hardhat account #0 private key, web3j `Sign.signPrefixedMessage` (EIP-191 personal_sign — matching exactly what `EthereumSignatureVerifier` expects). Test 1: challenge → sign → verify → parse JWT → assert sub contains Hardhat address. Test 2: same signed message sent twice → first returns 200, second returns 401 (nonce consumed).
+
+**Why `JwtService.issue()` takes `issuedAt` from the caller:** if `JwtService` called `clock.instant()` internally, there would be two `instant()` calls — one inside `issue()` to set `iat`/`exp`, and one in `VerifyAndAuthenticate` to compute `expiresAt = issuedAt + ttl` for the `AuthResult`. Even a sub-millisecond clock tick between the two calls means the `expiresAt` in the response and the `exp` baked into the JWT are derived from different instants. The client receives `expiresAt` and uses it to decide when to refresh; a mismatch would cause it to think the token is live when it has already expired (or vice versa). Passing `issuedAt` from the caller guarantees both timestamps are derived from the same instant.
+
+**Why `AuthResult` exists (not just returning the token string):** the controller needs both `token` (to put in the response body) and `expiresAt` (to populate `expiresAt` in the response without re-parsing the JWT). A raw `String` would force the controller to either re-parse its own JWT or trust a magic constant for the TTL. The record is the minimum honest surface between the use case and its caller.
+
+**Why `VerificationException` → 401 (not 400):** the request was well-formed — the JSON parsed, `@Valid` passed, fields were present. What failed was authentication: the nonce was missing/consumed, the signature was wrong, or the fields didn't match. 400 means "I don't understand the request"; 401 means "I understand it but won't authenticate you." The 401 is the correct semantic and is what token clients branch on to trigger a re-auth flow.
+
+**The startup guard lives in `JwtConfiguration`, not `JwtService`:** JJWT's `Keys.hmacShaKeyFor()` throws `WeakKeyException` (a `SecurityException`) for keys shorter than 256 bits — that behavior exists regardless of our check. Our `IllegalStateException` with a human-readable message fires *before* JJWT sees the bytes. This distinction matters for testability: testing the guard at the `JwtConfiguration` layer (which has package-private access in tests) avoids triggering JJWT's own `WeakKeyException` when constructing the test input, which would have thrown before the assertion could run.
+
+**`@DynamicPropertySource` for Redis in `VerifyFlowE2ETest`:** Spring Boot's `@ServiceConnection` automates JDBC/R2DBC datasource binding for `PostgreSQLContainer`, but it has no connector for `GenericContainer` running Redis. `@DynamicPropertySource` registers `spring.data.redis.host` and `spring.data.redis.port` at context-refresh time, before any beans are created, which is the correct lifecycle hook for Testcontainers port bindings.
+
+**Learned:** The clock-tick drift problem (`iat` in the token ≠ `expiresAt` returned to the caller) is not hypothetical — both fields are computed within the same request, so they must derive from the same instant. Passing the instant explicitly from the caller (rather than having the service capture it) is a general pattern for any code that embeds a timestamp in one artifact and reports it in another. Think about this whenever you see two `now()` calls in the same logical operation. The startup guard test revealed a second lesson: JJWT enforces its own invariants eagerly. Testing your *wrapping* guard means you must not trigger JJWT's guard first — which requires testing at the layer that calls JJWT, not at the layer that uses the already-constructed key.
+
+**Open / next:** M2 — refresh tokens: `RefreshSession` use case, refresh token family stored in Postgres, rotation + reuse detection, `Logout` invalidating the family. `SecurityConfiguration` also needs to grow to validate the access JWT on protected endpoints (the filter was not needed in M1 because all M1 endpoints are public).
+
+---
+
+## M1 · step 4 — Identity upsert (first durable Postgres write)   (commit <hash>)
+
+**What:** Added the wallet identity layer. Seven files changed or created.
+
+*Core (no Spring/JPA):*
+- `WalletIdentity` — immutable record: `(id, identityKey, status, createdAt, lastLoginAt)`. Compact constructor rejects nulls and blank status. No JPA annotations.
+- `WalletIdentityStore` — port interface in `identity`: `upsertOnLogin(CaipAccountId) → WalletIdentity`.
+
+*Infrastructure:*
+- `V2__wallet_identity.sql` — Flyway migration: `wallet_identity` table with `gen_random_uuid()` PK, `UNIQUE(namespace, address)` constraint (no `chain_id` column — the identity-key design made durable).
+- `WalletIdentityEntity` — JPA entity mapped to `wallet_identity`; no setters, no `@GeneratedValue` (Postgres generates the UUID, we only ever read the entity via Spring Data, never save it).
+- `WalletIdentityRepository` — Spring Data `JpaRepository` with one derived query (`findByNamespaceAndAddress`).
+- `JpaWalletIdentityStore` — implements `WalletIdentityStore`. Runs a native `INSERT ... ON CONFLICT (namespace, address) DO UPDATE SET last_login_at = :now`, then `flush()` + `clear()` to purge the L1 cache, then a `findByNamespaceAndAddress` to return the current row. Clock is injected; `OffsetDateTime.ofInstant(clock.instant(), UTC)` is used for the timestamp parameter to guarantee correct `TIMESTAMPTZ` binding through JDBC 42.x.
+
+*Wiring:*
+- `VerifyAndAuthenticate` received `WalletIdentityStore` as a new constructor parameter; step 6 now calls `identityStore.upsertOnLogin(account)` as a side-effect before returning the `CaipAccountId`. `UseCaseConfiguration` wires `JpaWalletIdentityStore` (auto-detected as `@Component`) into the use case bean.
+
+*Tests:* `VerifyAndAuthenticateTest` added `InMemoryWalletIdentityStore` stub (10 tests unchanged, happy path now also asserts `upsertOnLogin` was called once). `JpaWalletIdentityStoreTest` (3 tests against real Postgres via Testcontainers): new-account row, second-login updates `last_login_at` without touching `created_at`, and different `chainId` = same identity row. `WalletIdentityConcurrencyTest` (1 test): uses the real Spring-managed `JpaWalletIdentityStore` via `@Import` + `@Transactional(NOT_SUPPORTED)` so each of 8 virtual threads runs the full upsert → flush → clear → findByNamespaceAndAddress sequence in its own committed transaction; asserts no thread threw (the `orElseThrow` in the adapter is the failure mode) and exactly one row exists — exercises the adapter, not raw SQL.
+
+**Why the return type of `execute()` stays `CaipAccountId`:** Architecture §6 says JWT subject = the CAIP-10 string. M2 does not need the `WalletIdentity` UUID from `execute()`. Rule of three: no signature change until there is a real second caller that requires `WalletIdentity` from this method. The upsert is a side-effect from the use case's perspective.
+
+**Why `entityManager.flush()` + `entityManager.clear()` after the native upsert:** JPA's first-level (L1) cache is per-EntityManager (per-transaction). A native SQL `INSERT ... ON CONFLICT DO UPDATE` bypasses the L1 cache — Hibernate doesn't know the row was created or updated. Without `flush()`, the native statement might be held pending; without `clear()`, the subsequent `findByNamespaceAndAddress` can return a stale (empty) L1 entry. Both are required for correctness.
+
+**Why `OffsetDateTime` instead of `Instant` for the native query parameter:** Hibernate 6 maps `Instant` to `TIMESTAMP_WITH_TIMEZONE` via JPQL, but in native queries the binding goes through the JDBC driver's `setObject`. While PostgreSQL JDBC 42.x does support `Instant` here, `OffsetDateTime` is the explicit, unambiguous type — it maps to `TIMESTAMPTZ` in PostgreSQL without relying on implicit type inference. One extra conversion at call time buys a clear data-type contract.
+
+**Spring Boot 4.x discovery — `@DataJpaTest` moved packages:** The `@DataJpaTest` annotation is no longer in `spring-boot-test-autoconfigure`. Spring Boot 4.x extracted all data-tier test slices into per-module test jars. The new coordinates are `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest` (in `spring-boot-data-jpa-test`) and `org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase` (in `spring-boot-jdbc-test`). The build required `testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")` to pull these in. The `@DataJpaTest` slice still runs Flyway when `replace = NONE` — that behavior is preserved.
+
+**Learned:** Database schema is the best place to enforce an architecture decision. The `UNIQUE(namespace, address)` constraint — without a `chain_id` column — makes the identity-key design physically impossible to violate, not just conventionally true in code. The `ON CONFLICT DO UPDATE` pattern is not just an optimisation; it is the atomicity guarantee that makes concurrent first-logins safe. Without it, a `SELECT` + conditional `INSERT` would have a race window between the two statements.
+
+**Open / next:** M1 step 5 — access JWT issuance. `VerifyAndAuthenticate` currently returns a `CaipAccountId`; it will grow to return a signed JWT (HS256, ~10 min expiry, subject = CAIP-10 string). Introduce `JwtService` in the `session` package and `POST /v1/auth/verify` in `api`.
 
 ---
 
