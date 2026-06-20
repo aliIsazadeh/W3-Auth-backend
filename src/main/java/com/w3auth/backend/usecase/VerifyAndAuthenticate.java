@@ -5,6 +5,8 @@ import com.w3auth.backend.challenge.ChallengePolicy;
 import com.w3auth.backend.challenge.ChallengeStore;
 import com.w3auth.backend.identity.CaipAccountId;
 import com.w3auth.backend.identity.Namespace;
+import com.w3auth.backend.identity.WalletIdentityStore;
+import com.w3auth.backend.session.JwtService;
 import com.w3auth.backend.verification.SignatureVerifier;
 import com.w3auth.backend.verification.SiweMessage;
 import com.w3auth.backend.verification.SiweMessageParser;
@@ -13,10 +15,11 @@ import com.w3auth.backend.verification.VerificationRequest;
 import com.w3auth.backend.verification.VerifiedIdentity;
 
 import java.time.Clock;
+import java.time.Instant;
 
 /**
  * Orchestrates the full EIP-4361 verify flow: parse → consume nonce → validate
- * fields → verify signature → check signer → return authenticated account.
+ * fields → verify signature → check signer → upsert identity → issue access JWT.
  *
  * <p>No Spring annotations — {@code usecase} is a core package. Wiring to
  * Spring happens in {@code config.UseCaseConfiguration}.
@@ -26,27 +29,33 @@ public class VerifyAndAuthenticate {
     private final ChallengeStore challengeStore;
     private final ChallengePolicy policy;
     private final SignatureVerifier signatureVerifier;
+    private final WalletIdentityStore identityStore;
+    private final JwtService jwtService;
     private final Clock clock;
 
     public VerifyAndAuthenticate(ChallengeStore challengeStore, ChallengePolicy policy,
-                                 SignatureVerifier signatureVerifier, Clock clock) {
+                                 SignatureVerifier signatureVerifier,
+                                 WalletIdentityStore identityStore,
+                                 JwtService jwtService, Clock clock) {
         this.challengeStore = challengeStore;
         this.policy = policy;
         this.signatureVerifier = signatureVerifier;
+        this.identityStore = identityStore;
+        this.jwtService = jwtService;
         this.clock = clock;
     }
 
     /**
-     * Verifies a signed SIWE message and returns the authenticated wallet account.
+     * Verifies a signed SIWE message and returns an access JWT for the authenticated wallet.
      *
      * @param rawMessage the EIP-4361 plaintext exactly as presented for signing
      * @param signature  the hex-encoded signature from the wallet
-     * @return the authenticated {@link CaipAccountId}
+     * @return an {@link AuthResult} containing the access token and its expiry
      * @throws VerificationException for any failure: malformed message, nonce
      *         missing/expired/reused, field mismatch, invalid signature, or
      *         signer-address mismatch
      */
-    public CaipAccountId execute(String rawMessage, String signature) throws VerificationException {
+    public AuthResult execute(String rawMessage, String signature) throws VerificationException {
 
         // Step 1: parse the message — fail fast before touching the nonce store
         SiweMessage parsed;
@@ -70,16 +79,21 @@ public class VerifyAndAuthenticate {
         VerifiedIdentity verified = signatureVerifier.verify(new VerificationRequest(parsed, rawMessage, signature));
 
         // Step 5: signer must equal the address the message claims
-        // Case-insensitive: ecrecover may return mixed-case; full canonicalization is in M1 step 3 (ecrecover)
         if (!verified.signerAddress().equalsIgnoreCase(parsed.address())) {
             throw new VerificationException(
                     "signer mismatch: recovered '" + verified.signerAddress()
                     + "' but message claims '" + parsed.address() + "'");
         }
 
-        // Step 6: derive and return the authenticated account
-        // CaipAccountId.of canonicalizes the address to lowercase
-        return CaipAccountId.of(Namespace.EIP155, parsed.chainId(), parsed.address());
+        // Step 6: upsert wallet identity (first durable write)
+        CaipAccountId account = CaipAccountId.of(Namespace.EIP155, parsed.chainId(), parsed.address());
+        identityStore.upsertOnLogin(account);
+
+        // Step 7: issue access JWT. Capture issuedAt once so the embedded iat and the
+        // returned expiresAt are derived from the same instant — no clock-tick drift.
+        Instant issuedAt = clock.instant();
+        String token = jwtService.issue(account, issuedAt);
+        return new AuthResult(token, issuedAt.plus(jwtService.ttl()));
     }
 
     private void validateFields(SiweMessage parsed, Challenge challenge) throws VerificationException {
