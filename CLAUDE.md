@@ -80,7 +80,7 @@ com.<org>.walletauth
 ├── session/         access/refresh token logic, SessionStore (port)
 ├── usecase/         RequestChallenge, VerifyAndAuthenticate, RefreshSession, Logout
 ├── infrastructure/  JPA entities + repos, Redis adapters, Flyway
-├── security/        Spring Security config, JWT filter
+├── security/        Spring Security config, JWT filter (`JwtAuthenticationFilter`)
 └── api/             REST controllers, request/response DTOs
 ```
 
