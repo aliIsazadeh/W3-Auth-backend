@@ -119,8 +119,12 @@ whole family if a already-rotated token is reused (reuse = likely theft).
 ## 6. Session design
 
 - **Access token:** JWT, ~10 minutes, **HS256** with a strong secret for V1.
-  Claims: subject = `CaipAccountId`, a `jti`, an audience. Short lifetime means
+  Claims: subject = `namespace:address` (the identity key — no chainId,
+  per §2), a `jti`, an audience. Short lifetime means
   no revocation needed on the hot path; it just expires.
+  The subject is defined canonically in
+  `CaipAccountId.IdentityKey.toJwtSubject()` so it cannot drift between
+  `/verify` and (coming) `/refresh`.
   - *Why HS256 not RS256/ES256:* asymmetric signing only earns its keep when a
     separate service or SDK verifies tokens without sharing the secret. V1 is
     one service that both issues and verifies. Because access tokens are short,
