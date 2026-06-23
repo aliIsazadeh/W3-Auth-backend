@@ -155,7 +155,7 @@ The filter reads `claims.getSubject()` and stores it as the principal — an opa
 
 ---
 
-## M2 · step 4a — Refresh token storage layer   (commit <hash>)
+## M2 · step 4a — Refresh token storage layer   (commit 45bacfd)
 
 **What:** Sixteen files created or modified across three layers (14 new, 2 modified — application.yml and this journal entry).
 
@@ -195,7 +195,7 @@ Faking overlap produces a green test that asserts nothing. Naming the gap and te
 
 ---
 
-## M2 · step 1 — JWT authentication filter + protected endpoint   (commit <hash>)
+## M2 · step 1 — JWT authentication filter + protected endpoint   (commit c20e738)
 
 **What:** Five files created or modified; two test files created or modified. Everything on branch `claude/m2-jwt-filter`.
 
@@ -237,7 +237,7 @@ The 406 error on the valid-token test made the cause immediately clear in hindsi
 
 ---
 
-## M1 · cleanup — MethodArgumentNotValidException handler + Redis GETDEL concurrency guard   (commit <hash>)
+## M1 · cleanup — MethodArgumentNotValidException handler + Redis GETDEL concurrency guard   (commit bc67c9d)
 
 **What:** Two deferred items closed in one commit.
 
@@ -255,7 +255,7 @@ The 406 error on the valid-token test made the cause immediately clear in hindsi
 
 ---
 
-## M1 · step 5 — Access JWT issuance + POST /v1/auth/verify   (commit <hash>)
+## M1 · step 5 — Access JWT issuance + POST /v1/auth/verify   (commit 7325ad6)
 
 **What:** Completed the M1 end-to-end login. Nine files created, seven modified.
 
@@ -299,7 +299,7 @@ Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackso
 
 ---
 
-## M1 · step 4 — Identity upsert (first durable Postgres write)   (commit <hash>)
+## M1 · step 4 — Identity upsert (first durable Postgres write)   (commit cb64835)
 
 **What:** Added the wallet identity layer. Seven files changed or created.
 
@@ -332,7 +332,7 @@ Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackso
 
 ---
 
-## M1 · step 3 — `EthereumSignatureVerifier` (EOA ecrecover)   (commit <hash>)
+## M1 · step 3 — `EthereumSignatureVerifier` (EOA ecrecover)   (commit fbb3268)
 
 **What:** Added `EthereumSignatureVerifier` in `verification`, implementing `SignatureVerifier`. It decodes the hex signature to 65 raw bytes (explicit per-character hex validation), normalises `v ∈ {0,1}` to `{27,28}`, constructs `Sign.SignatureData`, and calls web3j's `Sign.signedPrefixedMessageToKey` — which applies the EIP-191 prefix (`"\x19Ethereum Signed Message:\n{byteLen}"`) and Keccak-256 internally before recovering the public key via secp256k1 ecrecover. The recovered address (`Keys.getAddress(publicKey)`, lowercase, no 0x) is returned in `VerifiedIdentity`. `SignatureException` from web3j (invalid `v`, point not on curve) is wrapped as `VerificationException` — fail closed. `VerificationRequest` gained a `rawMessage` field (the exact wire bytes signed by the wallet). `EthereumSignatureVerifier` is wired as a bean in `UseCaseConfiguration` alongside the `VerifyAndAuthenticate` bean it powers. 7 tests in `EthereumSignatureVerifierTest`.
 
@@ -350,7 +350,7 @@ Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackso
 
 ---
 
-## M1 · step 2 — `VerifyAndAuthenticate` use case + `SignatureVerifier` seam   (commit <hash>)
+## M1 · step 2 — `VerifyAndAuthenticate` use case + `SignatureVerifier` seam   (commit 2fec96f)
 
 **What:** Added four types to `verification`: `SignatureVerifier` (the interface from ARCHITECTURE §8 — `VerifiedIdentity verify(VerificationRequest) throws VerificationException`), `VerificationRequest` (record: parsed `SiweMessage` + raw signature string), `VerifiedIdentity` (record: recovered signer address), and `VerificationException` (checked exception, single class). Added `VerifyAndAuthenticate` to `usecase` — pure Java, no Spring, constructor takes `ChallengeStore`, `ChallengePolicy`, `SignatureVerifier`, `Clock`. One `execute(rawMessage, signature)` method wires the full flow: parse → atomic consume → field validation → signature verify → signer match → derive `CaipAccountId`. `VerifyAndAuthenticateTest` has 10 tests: happy path + all security failure paths (nonce missing, nonce reused, wrong domain, wrong URI, wrong version, wrong chainId, message expired, issuedAt in future, signer mismatch).
 
@@ -368,7 +368,7 @@ Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackso
 
 ---
 
-## M1 · step 1 — SIWE parser: `SiweMessage` + `SiweMessageParser`   (commit <hash>)
+## M1 · step 1 — SIWE parser: `SiweMessage` + `SiweMessageParser`   (commit 519b767)
 
 **What:** Added two classes to the `verification` package. `SiweMessage` is an immutable record with eight fields (`domain`, `address`, `uri`, `version`, `chainId`, `nonce`, `issuedAt`, `expiresAt`); its compact constructor rejects null/blank strings and null instants, and deliberately does **not** canonicalize the address — that is verification's job, not the parser's. `SiweMessageParser` is a pure Java class (zero Spring imports) with one static method `parse(String)`. It splits on `\n` with `-1` limit, hard-fails on anything other than exactly 10 lines, validates each line's prefix, checks that lines 2 and 3 are empty, and wraps `DateTimeParseException` in `IllegalArgumentException`. `SiweMessageParserTest` has 7 tests: two round-trips (whole-second and sub-second instants) plus five malformed-input cases (too few lines, too many lines, missing prefix, garbage timestamp, non-empty blank line).
 
@@ -504,7 +504,7 @@ Three coordinates: `jjwt-api` (compile), `jjwt-impl` (runtimeOnly), `jjwt-jackso
 
 ---
 
-## M0 · closer — SecurityFilterChain + isolation test   (commit <hash>)
+## M0 · closer — SecurityFilterChain + isolation test   (commit e5f7365)
 
 **What:** Added `SecurityConfiguration` (the `SecurityFilterChain` bean that was described in `security/package-info.java` but never actually written): `/v1/auth/**` and `/actuator/health/**` permitted, everything else `authenticated()`, `STATELESS` sessions, CSRF/httpBasic/formLogin disabled, and an `HttpStatusEntryPoint(UNAUTHORIZED)` so unauthenticated requests get 401, not Spring's default 403. Added `SecurityConfigurationTest` — a sliced `@SpringBootTest(classes = {SecurityConfiguration, <stub controller>})` with `@ImportAutoConfiguration(ServletWebSecurityAutoConfiguration.class)`, MockMvc built via `webAppContextSetup(wac).apply(springSecurity())`, asserting: public path reaches the controller, POST is not CSRF-blocked and sets no JSESSIONID, unknown path → 401.
 
