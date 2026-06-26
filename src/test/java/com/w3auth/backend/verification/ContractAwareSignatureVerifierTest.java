@@ -280,4 +280,50 @@ class ContractAwareSignatureVerifierTest {
                 .isInstanceOf(VerificationException.class)
                 .hasMessageContaining("transport error");
     }
+
+    // ── EIP-6492 malformed-envelope rejection: load-bearing bounds checks ─────
+    //
+    // Both vectors are derived by mutating VALID_6492_SIG (produced by web3j
+    // DefaultFunctionEncoder). FakeChainClient is configured with deployless=true so that
+    // a missing bounds check surfaces as a wrong-accept (test failure), not a silent pass.
+
+    @Test
+    void eip6492_badOffset_throwsBeforeChainCall() {
+        // Mutate word 2 (sigBytes[64..95]), the innerSig head offset.
+        // Low 4 bytes (sigBytes[92..95]) change from 0x000000a0 (160) to 0x0000ffff (65535).
+        // 65535 >= bodyLen (224): readOffset throws "out of range" before isValidSignatureDeployless.
+        byte[] b = Numeric.hexStringToByteArray(VALID_6492_SIG.substring(2));
+        b[92] = 0x00; b[93] = 0x00; b[94] = (byte) 0xff; b[95] = (byte) 0xff;
+        String badOffsetSig = "0x" + Numeric.toHexStringNoPrefix(b);
+
+        var stub = new StubEoaVerifier(EOA_IDENTITY);
+        var fake = new FakeChainClient("0x", null, true);
+        var dispatcher = new ContractAwareSignatureVerifier(stub, fake);
+
+        assertThatThrownBy(() -> dispatcher.verify(request(ADDRESS, badOffsetSig)))
+                .isInstanceOf(VerificationException.class)
+                .hasMessageContaining("6492");
+        assertThat(fake.isValidDeploylessCallCount).isEqualTo(0);
+        assertThat(fake.getCodeCallCount).isEqualTo(0);
+    }
+
+    @Test
+    void eip6492_lengthOverrun_throwsBeforeChainCall() {
+        // Mutate word 3 (sigBytes[96..127]), the factoryCalldata length.
+        // Low 4 bytes (sigBytes[124..127]) change from 0x00000004 (4) to 0x0000ffff (65535).
+        // validateDynamicField: 96 + 32 + 65535 = 65663 > bodyLen (224) → throws before chain call.
+        byte[] b = Numeric.hexStringToByteArray(VALID_6492_SIG.substring(2));
+        b[124] = 0x00; b[125] = 0x00; b[126] = (byte) 0xff; b[127] = (byte) 0xff;
+        String lengthOverrunSig = "0x" + Numeric.toHexStringNoPrefix(b);
+
+        var stub = new StubEoaVerifier(EOA_IDENTITY);
+        var fake = new FakeChainClient("0x", null, true);
+        var dispatcher = new ContractAwareSignatureVerifier(stub, fake);
+
+        assertThatThrownBy(() -> dispatcher.verify(request(ADDRESS, lengthOverrunSig)))
+                .isInstanceOf(VerificationException.class)
+                .hasMessageContaining("6492");
+        assertThat(fake.isValidDeploylessCallCount).isEqualTo(0);
+        assertThat(fake.getCodeCallCount).isEqualTo(0);
+    }
 }
