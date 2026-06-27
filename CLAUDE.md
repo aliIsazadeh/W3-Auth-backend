@@ -24,19 +24,21 @@ custom SDK — the backend treats them all identically.
 - Hibernate / JPA, Flyway for migrations
 - JWT for access tokens, JUnit + Testcontainers for tests
 - Docker / docker-compose for local Postgres + Redis
+- web3j (crypto 4.12.3 since M1; core 4.12.3 added M3) — isolated to `verification` and `infrastructure`; no RPC dependency in core packages
 
 ## V1 scope (hold this line)
 
 IN scope:
 - SIWE only (EIP-4361)
 - EVM chains only
-- EOA (normal) wallets only
+- EOA (normal) wallets
+- EIP-1271 deployed smart-contract wallets (M3a, shipped)
+- EIP-6492 counterfactual smart-contract wallets (M3b, shipped)
 
 OUT of scope for V1 (do not build yet):
 - Solana / non-EVM chains
 - SIWX abstraction layer
 - Plugin system or protocol registry
-- Smart-contract wallet verification (EIP-1271 / EIP-6492) — that is M3
 - JWT denylist / instant access-token revocation
 - Multi-module Gradle build (single module + packages for now)
 
@@ -76,10 +78,12 @@ OUT of scope for V1 (do not build yet):
 com.<org>.walletauth
 ├── identity/        CaipAccountId, Namespace, WalletIdentity
 ├── challenge/       Challenge, Nonce, ChallengeStore (port), ChallengePolicy
-├── verification/    SignatureVerifier, EthereumSignatureVerifier, SIWE parser
+├── verification/    SignatureVerifier (interface), EthereumSignatureVerifier (EOA),
+│                    ContractAwareSignatureVerifier (dispatcher), ChainClient (port),
+│                    Eip6492Envelope (6492 well-formedness gate), SiweMessage, SiweMessageParser
 ├── session/         access/refresh token logic, SessionStore (port)
 ├── usecase/         RequestChallenge, VerifyAndAuthenticate, RefreshSession, Logout
-├── infrastructure/  JPA entities + repos, Redis adapters, Flyway
+├── infrastructure/  JPA entities + repos, Redis adapters, Flyway, Web3jChainClient
 ├── security/        Spring Security config, JWT filter (`JwtAuthenticationFilter`)
 └── api/             REST controllers, request/response DTOs
 ```
@@ -96,9 +100,12 @@ replaces multi-module boundaries for now.
   design choices and tradeoffs as you go — I am learning backend engineering
   through this project.
 - Apply the **rule of three**: build the first concrete implementation, do not
-  add an interface or abstraction until a real second case forces it. The one
-  allowed interface (`SignatureVerifier`) exists as a test seam, not for a
-  future protocol.
+  add an interface or abstraction until a real second case forces it.
+  `SignatureVerifier` began as a test seam with one implementation
+  (`EthereumSignatureVerifier`); the real second case arrived at M3
+  (`ContractAwareSignatureVerifier`, the dispatcher for EOA / EIP-1271 /
+  EIP-6492). The abstraction earned its keep. The same discipline applies to
+  any new abstraction — no hypothetical future cases.
 - If a request of mine weakens the architecture, push back and say so directly.
 - No tutorial/demo shortcuts. Production-grade only.
 
@@ -122,3 +129,21 @@ replaces multi-module boundaries for now.
 
 Ignore for this project: `/design*`, `/qa`, `/browse`, `/canary`, `/benchmark`
 — they are for apps with a UI. This is a headless API.
+
+## Project skills (Claude Code)
+
+The `.claude/skills/` directory holds four skills that encode the working rules
+for this project and are applied automatically before tasks in their domain:
+
+- `w3auth-architecture` — locked identity model, layer boundaries, rule of
+  three, when to split a module
+- `w3auth-security` — security review checklist for challenge, verification,
+  and session code paths
+- `w3auth-journal` — journal discipline: write from the diff, same commit as
+  the code, four-section entry format
+- `w3auth-verification` — proof discipline: every "done" claim must cite a
+  real artifact (HTML report, git diff, Redis output)
+
+**When a skill and this document conflict, the skill and the repo are
+authoritative.** Treat the conflict as a signal that this document has drifted
+and should be reconciled.

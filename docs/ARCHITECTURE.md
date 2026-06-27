@@ -59,8 +59,11 @@ Packages:
 | `api`            | REST controllers, request/response DTOs                         |
 
 **When to split into real modules later:** when a heavy dependency needs
-isolating (web3j / RPC client at M3), or when you want to publish the wire
-contract as its own artifact for client SDKs. Not before.
+isolating, or when you want to publish the wire contract as its own artifact
+for client SDKs. Not before. Note: web3j (`core` + `crypto`) landed at M3
+without triggering a module split — the dependency was isolated to
+`verification` and `infrastructure` via the `ChainClient` port, which was
+sufficient. The split remains deferred until it earns its keep.
 
 ## 4. Persistence: ephemeral vs durable
 
@@ -146,16 +149,37 @@ whole family if a already-rotated token is reused (reuse = likely theft).
 - **Do not log** raw signatures, raw refresh tokens, or full messages at info
   level.
 
-### Known V1 limitation: EOA only
+### Smart-contract wallet support (M3, shipped)
 
-V1 verifies EOA (normal) wallets via `ecrecover`. Smart-contract wallets
-(Safe, most account-abstraction wallets) sign via **EIP-1271**, and
-not-yet-deployed ones via **EIP-6492** — neither can be `ecrecover`-ed. The
-current mobile transport (Reown One-Click Auth) already onboards these, so some
-real users cannot log in until **M3**. Worse, telling a contract-wallet user
-*why* they failed needs an `eth_getCode` RPC call — the chain dependency we are
-deferring — so in pure EOA V1 they just get a generic "invalid signature." This
-is an accepted, conscious tradeoff for V1, not an oversight.
+M3 extended verification to cover smart-contract wallets. Two sub-milestones:
+
+**M3a — EIP-1271 (deployed contracts).** A `ChainClient` port lives in
+`verification` (no web3j import): methods `getCode` and
+`isValidErc1271Signature`. `Web3jChainClient` in `infrastructure` implements
+it. The `ContractAwareSignatureVerifier` dispatcher wraps
+`EthereumSignatureVerifier` behind the same `SignatureVerifier` seam and routes
+each request. Dispatch order is load-bearing:
+
+1. Check for the EIP-6492 magic suffix on the decoded signature **first** — a
+   6492 wrapper is a property of the signature, not the address, and can appear
+   on an already-deployed contract. Routing by `getCode` first would mis-route
+   a wrapped signature to the plain 1271 path.
+2. `eth_getCode`: code present → EIP-1271 `isValidErc1271Signature`; empty →
+   EOA `ecrecover`.
+
+The RPC URL is bound via `walletauth.chain.rpc-url`; the web3j bean is lazy so
+the app boots without a live node.
+
+**M3b — EIP-6492 (counterfactual / not-yet-deployed wallets).** The 6492 branch
+calls `ChainClient.isValidSignatureDeployless`, implemented in
+`Web3jChainClient` as a deployless `eth_call` (`to=null`) to the
+`ValidateSigOffchain` universal validator — compiled solc 0.8.28, stored as a
+verified bytecode constant. The validator deploys the wallet counterfactually
+inside a single EVM frame, calls `isValidSignature`, and returns `0x01` (valid)
+or `0x00` (invalid). The full EIP-6492-wrapped signature is passed whole over
+the port; the validator unwraps internally. `Eip6492Envelope` in `verification`
+performs a pure-Java well-formedness gate (bounds checks on the ABI-encoded
+body) before any RPC call is made; malformed envelopes are rejected in-process.
 
 ## 8. The one allowed interface
 
@@ -165,26 +189,36 @@ public interface SignatureVerifier {
 }
 ```
 
-V1 has exactly one implementation: `EthereumSignatureVerifier`. The interface
-exists as a **test seam** (so the auth use case can be tested with a mock),
-**not** as a future-protocol abstraction. If the only reason you can give for
-keeping it is "future Solana," delete it and use the concrete class — the real
-second implementation arrives at M3 (EIP-1271), which justifies it then.
+Two concrete implementations exist:
+
+- `EthereumSignatureVerifier` — EOA `ecrecover` path.
+- `ContractAwareSignatureVerifier` — the dispatcher introduced at M3; routes
+  each request across the EOA, EIP-1271, and EIP-6492 paths. Wraps
+  `EthereumSignatureVerifier` internally.
+
+The interface began as a **test seam** (so `VerifyAndAuthenticate` can be
+tested with a one-liner stub). The real second case arrived at M3 and confirmed
+the abstraction was correct. It is not a future-protocol hook — the seam now
+has two real implementations, which is the rule-of-three justification.
 
 ## 9. Build order
 
-- **M0** — project skeleton, `CaipAccountId` + value objects, Redis
+- **M0** ✅ — project skeleton, `CaipAccountId` + value objects, Redis
   `ChallengeStore` with atomic consume, `/challenge` endpoint, docker-compose
   for Postgres + Redis, ArchUnit guard test. Goal: issue and store a nonce.
-- **M1** — SIWE parsing + full field validation, EOA `ecrecover`, signer-equals-
-  claim check, identity upsert, access JWT. Goal: an EOA wallet logs in
+- **M1** ✅ — SIWE parsing + full field validation, EOA `ecrecover`, signer-
+  equals-claim check, identity upsert, access JWT. Goal: an EOA wallet logs in
   end-to-end.
-- **M2** — refresh tokens, rotation, reuse detection, logout. Heavy `/cso` pass.
-- **M3** — smart-contract wallets (EIP-1271 + EIP-6492); introduces the RPC
-  dependency and per-`(chainId, address, msgHash)` caching. Likely the moment
-  to split `verification` into its own module.
+- **M2** ✅ — refresh tokens, rotation, reuse detection, logout.
+- **M3a** ✅ — EIP-1271 deployed smart-contract wallets; `ChainClient` port +
+  `Web3jChainClient` adapter (web3j core); `ContractAwareSignatureVerifier`
+  dispatcher. RPC dependency introduced. Module split justified but explicitly
+  deferred — web3j landed single-module.
+- **M3b** ✅ — EIP-6492 counterfactual wallets; `Eip6492Envelope` well-formedness
+  gate; `isValidSignatureDeployless` via deployless `eth_call` to the
+  `ValidateSigOffchain` universal validator.
 - **M4** — a second namespace (Solana, Ed25519) to prove the abstraction; only
-  then harden any registry.
+  then harden any registry. Unscoped.
 
 Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers
 integration tests.

@@ -41,12 +41,12 @@ flowchart LR
 | `identity`       | `CaipAccountId`, `Namespace` — the wallet identity model            | M0 ✅        |
 | `challenge`      | `Challenge`, `Nonce`, `ChallengeStore` (port), `ChallengePolicy`, `SiweMessageFactory` | M0 ✅ |
 | `usecase`        | `RequestChallenge` (M0), `VerifyAndAuthenticate` (M1), `RefreshSession` + `Logout` (M2) | M1 partial ✅ |
-| `infrastructure` | Redis adapters (`RedisChallengeStore`), JPA entities + repos, Flyway migrations, `JwtConfiguration` | M1 partial ✅ |
+| `infrastructure` | Redis adapters (`RedisChallengeStore`), JPA entities + repos, Flyway migrations, `JwtConfiguration`, `Web3jChainClient` (RPC adapter) | M3 ✅ |
 | `config`         | Composition root — wires use cases to infrastructure, supplies `Clock`, `ChallengePolicy`, `JwtService` beans | M1 ✅ |
-| `api`            | REST controllers, request/response DTOs                             | M1 partial ✅ |
-| `verification`   | `SignatureVerifier` (interface), `EthereumSignatureVerifier`, SIWE parser | M1 ✅  |
-| `session`        | `JwtPolicy`, `JwtService` (access JWT); refresh token logic, `SessionStore` (port) | M1 partial ✅ / M2 ⬜ |
-| `security`       | Spring Security config; `JwtAuthenticationFilter`                   | M2 step 1 ✅         |
+| `api`            | REST controllers, request/response DTOs                             | M2 ✅ |
+| `verification`   | `SignatureVerifier` (interface), `EthereumSignatureVerifier` (EOA), `ContractAwareSignatureVerifier` (dispatcher), `ChainClient` (port), `Eip6492Envelope` (6492 gate), SIWE parser | M3 ✅ |
+| `session`        | `JwtPolicy`, `JwtService` (access JWT); `RefreshTokenStore` (port), refresh token logic | M2 ✅ |
+| `security`       | Spring Security config; `JwtAuthenticationFilter`                   | M2 ✅ |
 
 ---
 
@@ -54,17 +54,30 @@ flowchart LR
 
 | Milestone | Goal | Status |
 |-----------|------|--------|
-| **M0** | Project skeleton; CAIP-10 identity; Redis challenge store with atomic nonce; `/challenge` endpoint; docker-compose; ArchUnit guard | Steps 1–5 done ✅; step 6 (controller) next ⬜ |
-| **M1** | SIWE parsing + full field validation; EOA `ecrecover`; signer-equals-claim check; identity upsert; access JWT. First end-to-end login | Steps 1–5 done ✅ |
-| **M2** | Refresh tokens; rotation; reuse detection (family revocation); logout. Security audit pass | Step 1 done ✅ (JWT filter + `/me`); step 2 next ⬜ |
-| **M3** | Smart-contract wallets (EIP-1271 + EIP-6492); RPC dependency; per-`(chainId, address, msgHash)` caching. Likely triggers `verification` module split | ⬜ |
-| **M4** | Second namespace (Solana / Ed25519) to prove and harden the abstraction; only then a real protocol registry | ⬜ |
+| **M0** | Project skeleton; CAIP-10 identity; Redis challenge store with atomic nonce; `/challenge` endpoint; docker-compose; ArchUnit guard | ✅ |
+| **M1** | SIWE parsing + full field validation; EOA `ecrecover`; signer-equals-claim check; identity upsert; access JWT. First end-to-end login | ✅ |
+| **M2** | Refresh tokens; rotation; reuse detection (family revocation); logout; JWT filter + protected endpoints | ✅ |
+| **M3a** | EIP-1271 deployed smart-contract wallets; `ChainClient` port + `Web3jChainClient` adapter; `ContractAwareSignatureVerifier` dispatcher; RPC dependency introduced single-module | ✅ |
+| **M3b** | EIP-6492 counterfactual wallets; `Eip6492Envelope` well-formedness gate; `isValidSignatureDeployless` via deployless `eth_call` to `ValidateSigOffchain` universal validator | ✅ |
+| **M4** | Second namespace (Solana / Ed25519) to prove and harden the abstraction; only then a real protocol registry | ⬜ unscoped |
 
 Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integration tests for the full auth flow.
 
 ---
 
 ## Part 2 — Step Log
+
+---
+
+## docs · reconcile CLAUDE.md + ARCHITECTURE.md to shipped M1–M3b state   (commit to follow on docs-refresh-m3)
+
+**What:** Three files changed; no production or test code touched. `CLAUDE.md`: added web3j to the tech-stack list; moved EIP-1271/6492 from "OUT of scope" to "IN scope (shipped)"; expanded the package-layout block with the real M3 class names (`ContractAwareSignatureVerifier`, `ChainClient`, `Eip6492Envelope`, `Web3jChainClient`); updated the rule-of-three note to record that the real second implementation (`ContractAwareSignatureVerifier`) arrived at M3; added a "Project skills" section pointing to `.claude/skills/` and establishing the drift rule (skill + repo beat this doc when they conflict). `docs/ARCHITECTURE.md`: §3 module-split note updated to record that web3j landed single-module and the split remains deferred; §7 subsection "Known V1 limitation: EOA only" rewritten as "Smart-contract wallet support (M3, shipped)" covering the dispatch order, `ChainClient` port, `Web3jChainClient`, EIP-1271 path, EIP-6492 deployless-eth_call path, and `Eip6492Envelope` gate; §8 updated to name both concrete implementations and state the rule-of-three outcome; §9 build-order bullets rewritten with ✅ on M0–M3b and M4 marked unscoped. `docs/JOURNAL.md`: Part 1 package map refreshed to reflect M3 additions to `verification` and `infrastructure`; milestone statuses corrected (M3 split into M3a/M3b, both ✅); roadmap table rows rewritten accordingly.
+
+**Why:** Both narrative docs were M0 snapshots. Four shipped milestones (M1, M2, M3a, M3b) had accumulated against them with no reconciliation. The immediate trigger was that the "V1 scope / OUT of scope" list in `CLAUDE.md` still said "Smart-contract wallet verification — that is M3," which is now actively misleading — M3 is done. The ARCHITECTURE.md §7 "Known V1 limitation: EOA only" subsection read as a future-tense commitment rather than a past-tense record. Every architectural claim added was verified against the live source tree before being written; no class name was invented. The rejected alternative was leaving the docs stale and relying on the journal Part 2 entries to carry the accurate record — viable, but a reader who starts with CLAUDE.md or ARCHITECTURE.md gets a false picture of scope and capability.
+
+**Learned:** Doc drift compounds milestone by milestone. A doc that says "this is M3 scope" stays in that state indefinitely unless reconciliation is an explicit step at merge time. The right trigger is the same-commit rule from the journal discipline applied to the narrative docs: each feature branch should include a doc-reconciliation pass before merge, not a separate catch-up after several milestones. The "skill beats doc" rule added to CLAUDE.md makes the authority hierarchy explicit — the skill files encode the working rules and are updated more frequently; the top-level docs are orientation material and will drift. Naming the drift rule in the doc itself is the mechanism that keeps the hierarchy honest.
+
+**Open / next:** M4 (second namespace, Solana / Ed25519) is the next milestone, currently unscoped. The verification module split (deferred since M3a) can be revisited when module isolation justifies the overhead. No production code deferred from this branch.
 
 ---
 
