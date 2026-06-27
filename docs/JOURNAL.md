@@ -68,6 +68,76 @@ Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integ
 
 ---
 
+## M3b · deployless eth_call adapter (EIP-6492 universal validator)   (commit cc970c8)
+
+**What:** Replaced the `UnsupportedOperationException` stub in
+`Web3jChainClient.isValidSignatureDeployless` with the real adapter.
+The call is a deployless contract-creation `eth_call` (`to=null`, data =
+`VALIDATOR_BYTECODE ++ FunctionEncoder.encodeConstructor(address signer,
+bytes32 hash, bytes signature)`). The validator is `ValidateSigOffchain` from
+the EIP-6492 reference implementation, compiled solc 0.8.28 `--optimize`, stored
+verbatim as `VALIDATOR_BYTECODE` — a single `static final String` constant,
+6626 hex chars (3313 bytes), no `0x` prefix (prepended at concat time).
+Return decode: `0x01` → `true`, `0x00` → `false`, empty / unexpected-length /
+transport → `RuntimeException` (same three-outcome contract as
+`isValidErc1271Signature`; an unparseable return is a transport fault, not
+authentication-failed). The full EIP-6492-wrapped signature is passed whole to
+the port; no unwrapping in the adapter. Added to
+`Web3jChainClientIntegrationTest` (reusing the existing anvil harness, no new
+container): `deployless_validEoaSignature_returnsTrue` (valid EOA sig →
+`0x01`), `deployless_forgedSignature_returnsFalse` (sig from a different key
+→ `0x00`), `deployless_tamperedHash_returnsFalse` (valid sig, wrong hash →
+`0x00`). Suite: 144 → 147; `Web3jChainClientIntegrationTest`: 7 → 10; 0 skipped.
+
+**Why:** This settles M3b Decision 1 — canonical universal validator via
+deployless eth_call — by making it real. The `ValidateSigOffchain` constructor
+receives `(signer, hash, fullWrappedSig)`, deploys the wallet counterfactually
+inside a single EVM frame, calls `isValidSignature`, and signals validity by
+returning a single byte via `return(31, 1)` (not a revert): `0x01` = valid,
+`0x00` = invalid. The rejected alternative was to peel the 6492 envelope in the
+adapter and forward only the inner signature and factory fields as separate
+arguments. That was wrong for two reasons: (1) the validator contract expects the
+full envelope as `bytes signature` and handles the unwrap itself — forwarding
+only the inner sig would bypass the counterfactual-deploy branch entirely; (2)
+the `Eip6492Envelope` decode in the dispatcher is a well-formedness GATE whose
+decoded components are intentionally discarded, not a decomposer feeding the
+adapter. `FunctionEncoder.encodeConstructor` (web3j ABI module, already on the
+classpath via `org.web3j:core:4.12.3`) encodes the three constructor arguments
+in standard ABI tuple layout with no function selector — the right encoding for
+a contract-creation data payload, not a regular call. `to=null` in
+`Transaction.createEthCallTransaction` signals a contract-creation eth_call to
+the node; web3j's `Transaction` class accepts null for the `to` field, which is
+the same wire convention used by the fixture-deployment helper in the test.
+
+**Learned:** A bytecode artifact supplied by a human as a verified constant must
+be treated with the same rigor as a cryptographic key — the entire proof chain
+breaks if it is mutated. Four verification layers were applied before trusting
+the constant: (1) provenance from the canonical EIP source (`ValidateSigOffchain`,
+not the singleton-deployed variant); (2) storage as a single unbroken line on
+disk (easy to diff-check); (3) a byte-for-byte length comparison of the in-source
+constant against the compiled `.bin` (6626 chars, match = True); (4) a live
+anvil run where a valid EOA signature returned `0x01`. A summary assertion
+"6626 chars, verbatim" was not accepted as sufficient; the on-disk byte comparison
+was required. The green `deployless_validEoaSignature_returnsTrue` test provides
+independent corroboration: corrupted bytecode either reverts (empty output →
+`RuntimeException`, not `true`) or returns garbage (unexpected-length →
+`RuntimeException`, not `true`), so a green result rules out silent corruption.
+Single-byte return via `return(31, 1)` is an uncommon EVM convention; decoding
+must treat `0x01` and `0x00` as exact one-byte values, not as leading bytes of a
+longer word, and must throw on any other output rather than defaulting to false.
+
+**Open / next:** The EOA tests exercise the validator's `ecrecover` branch only
+— they do not prove the counterfactual-deploy-then-1271 branch. That path
+requires Artifact B: a CREATE2 factory fixture and a not-yet-deployed (counterfactual)
+contract wallet, both supplied and verified by the human. Required assertions for
+that commit: the claimed address has NO deployed code before the call; the
+validator deploys to exactly the CREATE2-derived address and `isValidSignature`
+returns the magic value → adapter returns `true`; a forged inner signature causes
+rejection post-deploy → adapter returns `false`. The `// TODO(commit 2)` marker
+in `Web3jChainClientIntegrationTest` marks the insertion point.
+
+---
+
 ## M3b · EIP-6492 envelope decode + dispatch routing   (commits 207709e, 4d2cbb6)
 
 **What:** Two commits, one feature unit. (1) `207709e` — `ChainClient` gained
