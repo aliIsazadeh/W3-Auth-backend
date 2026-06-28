@@ -69,7 +69,7 @@ Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integ
 
 ---
 
-## M4 · piece 2 — SIWS message parser   (commit 8624e6b)
+## M4 · piece 2 — SIWS message parser   (commit da9de5b)
 
 **What:** Added `SiwsMessage` (immutable record, `verification` package) and `SiwsMessageParser` (strict static parser, `verification` package), plus `SiwsMessageParserTest` — 14 tests, all passing. No factory, no genesis constants, no Spring/Jackson/web3j imports; both production files are pure Java 21.
 
