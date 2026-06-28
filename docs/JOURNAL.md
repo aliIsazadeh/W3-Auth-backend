@@ -69,7 +69,7 @@ Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integ
 
 ---
 
-## M4 · piece 1.5 — ArchUnit layer-boundary guard   (commit e3b6302)
+## M4 · piece 1.5 — ArchUnit layer-boundary guard   (commit 62fda78)
 
 **What:** Added `com.tngtech.archunit:archunit-junit5:1.4.2` as a `testImplementation` dependency in `build.gradle.kts` (code commit e125df7). Created `LayerBoundaryTest` at `src/test/java/com/w3auth/backend/` — one `@Test` method `corePackagesMustNotImportFrameworkOrInfrastructure()`. The rule uses `noClasses().that().resideInAnyPackage(core).should().dependOnClassesThat().resideInAnyPackage(forbidden)` where `core = {identity.., challenge.., verification.., session.., usecase..}` and `forbidden = {org.springframework.., jakarta.persistence.., org.hibernate.., io.lettuce.., com.w3auth.backend.infrastructure..}`. An explicit `if (classes.isEmpty()) throw AssertionError(...)` guard precedes the rule so a vacuous pass on an empty classpath fails rather than silently greens. The `ClassFileImporter` imported 73 production classes — not vacuous. Suite: 165 → 166.
 
