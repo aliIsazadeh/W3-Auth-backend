@@ -69,6 +69,20 @@ Cross-cutting from M1 onward: rate limiting, audit logging, Testcontainers integ
 
 ---
 
+## M4 · housekeeping — Journal skill: two-commit citation rule   (commit 064c340)
+
+**What:** Replaced the same-commit journal cadence with a two-commit pattern in `.claude/skills/w3auth-journal/SKILL.md`. The Part 2 bullet, the Cadence section, and the frontmatter description were updated. The new rule: commit the code first; write the JOURNAL entry as a second commit on the same branch, citing the code commit's hash in the heading. No amend, no stamp commit, no placeholder.
+
+**Why:** An entry cannot cite the hash of the commit it lives in — writing the hash into the file changes the file, which changes the hash, creating a circular dependency. The old same-commit rule made this impossible to satisfy in one shot, producing the amend/stamp dance seen in M4 piece 2: two amends plus a separate stamp commit just to record a stable hash.
+
+Rejected alternative — *keep same-commit, always follow with a stamp commit*: the stamp commit exists only to repair a hash that the rule made unknowable. It adds noise to the branch history without adding information. Two commits (code, then journal) produces the same outcome — both on the branch, both before the merge — without the churn.
+
+**Learned:** A rule that requires a document to know its own identity is self-contradictory. The fix is not a workaround (stamp commit) but a restatement of the rule that eliminates the contradiction: write the thing that needs to be cited first, then write the citation.
+
+**Open / next:** Future pieces follow the two-commit pattern from here. The extra commits in earlier pieces (M4 piece 2's amend + stamp) are left as-is — history is not rewritten.
+
+---
+
 ## M4 · piece 2 — SIWS message parser   (commit da9de5b)
 
 **What:** Added `SiwsMessage` (immutable record, `verification` package) and `SiwsMessageParser` (strict static parser, `verification` package), plus `SiwsMessageParserTest` — 14 tests, all passing. No factory, no genesis constants, no Spring/Jackson/web3j imports; both production files are pure Java 21.
